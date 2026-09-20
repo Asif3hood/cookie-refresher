@@ -41,6 +41,12 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     NODE_ENV=production
 
+# ── 2b. Fix crashpad: Chromium needs a writable dir ─────────
+# Point XDG dirs to /tmp so any user can write
+ENV XDG_CONFIG_HOME=/tmp/.chromium \
+    XDG_CACHE_HOME=/tmp/.chromium \
+    HOME=/tmp
+
 WORKDIR /app
 
 # ── 3. Install dependencies (layer cache friendly) ───────────
@@ -50,9 +56,11 @@ RUN npm ci --omit=dev && npm cache clean --force
 # ── 4. Copy app source ──────────────────────────────────────
 COPY . .
 
-# ── 5. Non-root user (security best practice) ───────────────
-RUN groupadd -r app && useradd -r -g app app \
- && chown -R app:app /app
+# ── 5. Create user + writable dirs BEFORE dropping privileges ─
+RUN groupadd -r app && useradd -r -g app -m -d /home/app app \
+ && mkdir -p /tmp/.chromium /home/app \
+ && chmod -R 1777 /tmp/.chromium \
+ && chown -R app:app /app /home/app
 USER app
 
 # ── 6. Render injects $PORT (default 10000 for local docker) ─

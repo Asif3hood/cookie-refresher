@@ -78,6 +78,9 @@ async function launch(i) {
       '--no-default-browser-check',
       '--window-size=1366,900',
       '--lang=en-GB',
+      '--disable-crash-reporter',              // ← add
+      '--disable-features=CrashpadHandler',    // ← add
+      '--disable-breakpad',                    // ← add (older Chromium)
     ],
     protocolTimeout: 300000,
     ignoreDefaultArgs: ['--enable-automation'],
