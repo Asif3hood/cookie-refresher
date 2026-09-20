@@ -1,0 +1,41 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+cookie-refresher.js.*
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Chrome profiles (local runs)
+.chrome-profile-*/
+amz-chrome-*/
+*.chrome-profile/
+
+# Build artifacts
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Runtime state
+*.log
+logs/
+tmp/
+.tmp/
+refresher_pool_state.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

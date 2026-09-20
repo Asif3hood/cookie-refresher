@@ -1,0 +1,104 @@
+# ─────────────────────────────────────────────────────────────
+# cookie-refresher — 3 separate sidecar services
+# Same repo can be deployed to multiple Render accounts.
+# Render appends a unique suffix to service names if they collide,
+# so `refresher-1` on Account A and `refresher-1` on Account B
+# both work — you just get different URLs.
+# ─────────────────────────────────────────────────────────────
+
+services:
+  # ─── Sidecar 1 ────────────────────────────────────────────
+  - type: web
+    name: refresher-1
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter                # 512MB RAM min; standard (2GB) recommended
+    region: oregon               # ohio | virginia | frankfurt | singapore
+    autoDeploy: true             # any git push → auto redeploy
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: CONCURRENCY
+        value: 1
+      - key: HEADLESS
+        value: "new"
+      - key: EPHEMERAL_PROFILE
+        value: "1"
+      - key: VERBOSE
+        value: "1"
+      - key: NAV_TIMEOUT_MS
+        value: 25000
+      - key: CMC_WAIT_MS
+        value: 30000
+      - key: MIN_CMC_LEN
+        value: 100
+      - key: API_KEY
+        sync: false              # set per-account in Dashboard
+
+  # ─── Sidecar 2 ────────────────────────────────────────────
+  - type: web
+    name: refresher-2
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: CONCURRENCY
+        value: 1
+      - key: HEADLESS
+        value: "new"
+      - key: EPHEMERAL_PROFILE
+        value: "1"
+      - key: VERBOSE
+        value: "1"
+      - key: NAV_TIMEOUT_MS
+        value: 25000
+      - key: CMC_WAIT_MS
+        value: 30000
+      - key: MIN_CMC_LEN
+        value: 100
+      - key: API_KEY
+        sync: false
+
+  # ─── Sidecar 3 ────────────────────────────────────────────
+  - type: web
+    name: refresher-3
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: CONCURRENCY
+        value: 1
+      - key: HEADLESS
+        value: "new"
+      - key: EPHEMERAL_PROFILE
+        value: "1"
+      - key: VERBOSE
+        value: "1"
+      - key: NAV_TIMEOUT_MS
+        value: 25000
+      - key: CMC_WAIT_MS
+        value: 30000
+      - key: MIN_CMC_LEN
+        value: 100
+      - key: API_KEY
+        sync: false

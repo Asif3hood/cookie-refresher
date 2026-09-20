@@ -1,0 +1,24 @@
+{
+  "name": "refresher",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Amazon Pay cookie refresher sidecar (Puppeteer + Express)",
+  "main": "cookie-refresher.js",
+  "scripts": {
+    "start": "node cookie-refresher.js",
+    "dev": "PORT=3333 HOST=127.0.0.1 CONCURRENCY=1 EPHEMERAL_PROFILE=1 VERBOSE=1 node cookie-refresher.js",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": ["amazon", "cookie", "refresher", "puppeteer", "sidecar"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.19.2",
+    "puppeteer": "^23.11.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
