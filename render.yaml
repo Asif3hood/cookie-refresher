@@ -100,5 +100,5 @@ services:
         value: 30000
       - key: MIN_CMC_LEN
         value: 100
-      - key: API_KEY
+      - key: e6893c1ea2523acacd77eee70c0d4276064d7f0ca878eb18f7b70b6020cba2e6
         sync: false
