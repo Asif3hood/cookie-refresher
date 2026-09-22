@@ -30,7 +30,7 @@ const EPHEMERAL      = process.env.EPHEMERAL_PROFILE === '1';
 
 const NAV_TIMEOUT_MS = parseInt(process.env.NAV_TIMEOUT_MS || '25000', 10);
 const CMC_WAIT_MS    = parseInt(process.env.CMC_WAIT_MS    || '30000', 10);
-const DWELL_MS       = parseInt(process.env.DWELL_MS       || '3500',  10);
+const DWELL_MS       = parseInt(process.env.DWELL_MS       || '1500',  10);
 const MIN_CMC_LEN    = parseInt(process.env.MIN_CMC_LEN    || '100',   10);
 const MAX_BODY       = process.env.MAX_BODY || '512kb';
 
@@ -401,7 +401,7 @@ async function refresh({ cookies, proxy, userAgent, headers, category = 'ELECTRI
      * ═══════════════════════════════════════════════ */
     console.log(`[b${idx}] === P1 signed-in landing ===`);
     try { await page.goto(urls.signedInLanding, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
-    await new Promise(r => setTimeout(r, DWELL_MS));
+    await new Promise(r => setTimeout(r, 800));
 
     let r = await readAllCookies(context, page);
     console.log(`[b${idx}] ${line(r.merged, 'after-P1')}`);
@@ -411,7 +411,7 @@ async function refresh({ cookies, proxy, userAgent, headers, category = 'ELECTRI
      * ═══════════════════════════════════════════════ */
     console.log(`[b${idx}] === P2 amazonpay/home ===`);
     try { await page.goto(urls.payHome, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
-    await new Promise(r => setTimeout(r, DWELL_MS));
+    await new Promise(r => setTimeout(r, 800));
     r = await readAllCookies(context, page);
     console.log(`[b${idx}] ${line(r.merged, 'after-P2')}`);
 
@@ -420,7 +420,7 @@ async function refresh({ cookies, proxy, userAgent, headers, category = 'ELECTRI
      * ═══════════════════════════════════════════════ */
     console.log(`[b${idx}] === P3 landing/${urls.label} ===`);
     try { await page.goto(urls.landing, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
-    await new Promise(r => setTimeout(r, DWELL_MS));
+    await new Promise(r => setTimeout(r, 800));
     r = await readAllCookies(context, page);
     console.log(`[b${idx}] ${line(r.merged, 'after-P3')}`);
 
@@ -430,7 +430,7 @@ async function refresh({ cookies, proxy, userAgent, headers, category = 'ELECTRI
     if (urls.interstitial) {
       console.log(`[b${idx}] === P4 interstitial/${urls.label}/${billerId} ===`);
       try { await page.goto(urls.interstitial, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
-      await new Promise(r => setTimeout(r, DWELL_MS));
+      await new Promise(r => setTimeout(r, 800));
     }
 
     /* ═══════════════════════════════════════════════
@@ -438,7 +438,7 @@ async function refresh({ cookies, proxy, userAgent, headers, category = 'ELECTRI
      * ═══════════════════════════════════════════════ */
     console.log(`[b${idx}] === P5 detail/${urls.label} ===`);
     try { await page.goto(urls.detail, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
-    await new Promise(r => setTimeout(r, DWELL_MS));
+    await new Promise(r => setTimeout(r, 800));
 
     /* Extract csrf-token from the rendered HTML */
     try {
@@ -452,12 +452,58 @@ async function refresh({ cookies, proxy, userAgent, headers, category = 'ELECTRI
     /* ═══════════════════════════════════════════════
      * Wait until cmc is present in any storage
      * ═══════════════════════════════════════════════ */
-    const deadline = Date.now() + CMC_WAIT_MS;
-    while (Date.now() < deadline) {
+   /* ═══════════════════════════════════════════════
+ * Wait for cookies to settle.
+ *   • Break immediately on CMC (if it ever arrives)
+ *   • Break on ak_bmsc + bm_sv (the two the WAF cares about)
+ *     — aws-waf-token is optional: if it's there, great;
+ *       if not, we move on anyway.
+ *   • Never wait the full CMC_WAIT_MS unless cookies never form
+ * ═══════════════════════════════════════════════ */
+  const deadline = Date.now() + CMC_WAIT_MS;
+  let iter = 0;
+  while (Date.now() < deadline) {
+      iter++;
       r = await readAllCookies(context, page);
-      if (r.merged.cmc && r.merged.cmc.length >= MIN_CMC_LEN) break;
+
+      const hasCmc   = r.merged.cmc && r.merged.cmc.length >= MIN_CMC_LEN;
+      const hasAk    = !!r.merged.ak_bmsc;
+      const hasBm    = !!r.merged.bm_sv;
+      const hasWaf   = !!r.merged['aws-waf-token'];   // optional
+
+      /* ✅ Break: CMC arrived */
+      if (hasCmc) {
+          if (VERBOSE) console.log(`[b${idx}] CMC detected after ${iter} iteration(s)`);
+          break;
+      }
+
+      /* ✅ Break: primary WAF pair present (aws-waf-token optional) */
+      if (hasAk && hasBm) {
+          if (VERBOSE) {
+              console.log(`[b${idx}] WAF cookies ready after ${iter} iteration(s)  ak=${hasAk} bm=${hasBm} waf=${hasWaf}`);
+          }
+          break;
+      }
+
+      /* ✅ Break: only ak_bmsc + aws-waf-token present — rare but acceptable */
+      if (hasAk && hasWaf) {
+          if (VERBOSE) console.log(`[b${idx}] ak_bmsc + aws-waf-token ready after ${iter} iteration(s) — bm_sv missing, proceeding`);
+          break;
+      }
+
+      /* ✅ Break: only bm_sv + aws-waf-token present — same idea */
+      if (hasBm && hasWaf) {
+          if (VERBOSE) console.log(`[b${idx}] bm_sv + aws-waf-token ready after ${iter} iteration(s) — ak_bmsc missing, proceeding`);
+          break;
+      }
+
       await new Promise(res => setTimeout(res, 500));
-    }
+  }
+
+  if (VERBOSE && iter > 1) {
+      r = await readAllCookies(context, page);
+      console.log(`[b${idx}] cookie-wait finished after ${iter} iter(s)  ${line(r.merged, 'settled')}`);
+  }
 
     r = await readAllCookies(context, page);
     console.log(`[b${idx}] ${line(r.merged, 'done')}  ${Date.now() - t0}ms`);
