@@ -1,15 +1,21 @@
 #!/usr/bin/env node
 /**
- * cookie-refresher.js (v22 — exact browser flow + meta csrf)
+ * cookie-refresher.js (v23)
  *
- * Flow:
- *   1. GET /ref=ap_frn_logo/?_encoding=UTF8&ref_=navm_hdr_signin       (signed-in landing)
- *   2. GET /amazonpay/home?ref_=navm_em_navm_pay_btn_0_1_1_14
- *   3. GET /apay/landing/{cat}?ref_=apay_mobhome_V2_{Cat}
- *   4. GET /apay/interstitial/{cat}/{billerId}?ref_=...
- *   5. GET /apay/detail/{cat}?ref_=apay_interstitial_detail_fetch_{cat}
- *   6. Extract  <meta content="XXX" name="csrf-token"/>
- *   7. Harvest cookies from HTTP store + document.cookie + localStorage + sessionStorage
+ *   Flow:
+ *     1. GET /ref=ap_frn_logo/?_encoding=UTF8&ref_=navm_hdr_signin       (signed-in landing)
+ *     2. GET /amazonpay/home?ref_=navm_em_navm_pay_btn_0_1_1_14
+ *     3. GET /apay/landing/{cat}?ref_=apay_mobhome_V2_{Cat}
+ *     4. GET /apay/interstitial/{cat}/{billerId}?ref_=...
+ *     5. GET /apay/detail/{cat}?ref_=apay_interstitial_detail_fetch_{cat}
+ *     6. Extract  <meta content="XXX" name="csrf-token"/>
+ *     7. Harvest cookies from HTTP store + document.cookie + localStorage + sessionStorage
+ *
+ *   v23 changes:
+ *     • EPHEMERAL detection now accepts any truthy value (1, true, yes)
+ *     • Clean stale SingletonLock before launching a persistent profile
+ *     • Defaults tightened: NAV_TIMEOUT_MS=15000, CMC_WAIT_MS=6000, DWELL_MS=500
+ *     • Cookie wait exits early on csrf + any 2 of 3 WAF cookies
  */
 
 const express = require('express');
@@ -26,11 +32,15 @@ const CONCURRENCY    = parseInt(process.env.CONCURRENCY || '1', 10);
 const DEFAULT_PROXY  = process.env.PROXY || null;
 const HEADFUL        = process.env.HEADFUL === '1';
 const VERBOSE        = process.env.VERBOSE !== '0';
-const EPHEMERAL      = process.env.EPHEMERAL_PROFILE === '1';
 
-const NAV_TIMEOUT_MS = parseInt(process.env.NAV_TIMEOUT_MS || '25000', 10);
-const CMC_WAIT_MS    = parseInt(process.env.CMC_WAIT_MS    || '30000', 10);
-const DWELL_MS       = parseInt(process.env.DWELL_MS       || '1500',  10);
+/* ★ v23: accept any truthy value, not just '1' */
+const EPHEMERAL      = ['1','true','yes','on'].includes(
+    String(process.env.EPHEMERAL_PROFILE || '').toLowerCase()
+);
+
+const NAV_TIMEOUT_MS = parseInt(process.env.NAV_TIMEOUT_MS || '15000', 10);   /* was 25000 */
+const CMC_WAIT_MS    = parseInt(process.env.CMC_WAIT_MS    || '6000',  10);   /* was 30000 */
+const DWELL_MS       = parseInt(process.env.DWELL_MS       || '500',   10);   /* was 1500  */
 const MIN_CMC_LEN    = parseInt(process.env.MIN_CMC_LEN    || '100',   10);
 const MAX_BODY       = process.env.MAX_BODY || '512kb';
 
@@ -53,10 +63,21 @@ function shouldBlock(url, type) {
 const SLOTS = Array.from({ length: CONCURRENCY }, (_, i) => ({ idx: i, browser: null, promise: null, dir: null }));
 
 async function launch(i) {
-  const dir = EPHEMERAL
-    ? fs.mkdtempSync(path.join(os.tmpdir(), 'amz-chrome-'))
-    : path.join(__dirname, `.chrome-profile-${i}`);
-  if (!EPHEMERAL && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  /* ★ v23: use EPHEMERAL folder OR clean a persistent folder */
+  let dir;
+  if (EPHEMERAL) {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'amz-chrome-'));
+  } else {
+    dir = path.join(__dirname, `.chrome-profile-${i}`);
+    if (fs.existsSync(dir)) {
+      /* ★ Remove stale SingletonLock + friends before Chrome starts */
+      for (const f of ['SingletonLock','SingletonCookie','SingletonSocket']) {
+        try { fs.unlinkSync(path.join(dir, f)); } catch (_) {}
+      }
+    } else {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  }
 
   const executablePath =
     process.env.PUPPETEER_EXECUTABLE_PATH ||
@@ -66,21 +87,21 @@ async function launch(i) {
 
   const browser = await puppeteer.launch({
     executablePath,
-    headless: HEADLESS_MODE,       // 'new' on Render (env HEADLESS=new)
+    headless: HEADLESS_MODE,
     userDataDir: dir,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-blink-features=AutomationControlled',
-      '--disable-dev-shm-usage',   // critical in Docker
+      '--disable-dev-shm-usage',
       '--disable-gpu',
       '--no-first-run',
       '--no-default-browser-check',
       '--window-size=1366,900',
       '--lang=en-GB',
-      '--disable-crash-reporter',              // ← add
-      '--disable-features=CrashpadHandler',    // ← add
-      '--disable-breakpad',                    // ← add (older Chromium)
+      '--disable-crash-reporter',
+      '--disable-features=CrashpadHandler',
+      '--disable-breakpad',
     ],
     protocolTimeout: 300000,
     ignoreDefaultArgs: ['--enable-automation'],
@@ -380,65 +401,50 @@ async function refresh({ cookies, proxy, userAgent, headers, category = 'ELECTRI
       } catch (_) {}
     }
 
-    /* ═══════════════════════════════════════════════
-     * Inject account cookies FIRST (before any nav)
-     * ═══════════════════════════════════════════════ */
+    /* Inject account cookies FIRST (before any nav) */
     const seed = [];
     for (const [n, v] of Object.entries(jarIn)) {
       if (n === 'cmc') continue;
       seed.push({ name: n, value: v, domain: '.amazon.in', path: '/', secure: true });
     }
 
-    /* We need a page origin first to set cookies */
     try { await page.goto('https://www.amazon.in/', { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
     if (typeof context.setCookie === 'function')   await context.setCookie(...seed);
     else if (typeof page.setCookie === 'function') await page.setCookie(...seed);
     console.log(`[b${idx}] seeded ${seed.length} cookies`);
 
-    /* ═══════════════════════════════════════════════
-     * P1 — signed-in landing  (/ref=ap_frn_logo/...)
-     * This is the page that triggers the CSM beacon with an authenticated session
-     * ═══════════════════════════════════════════════ */
+    /* P1 — signed-in landing */
     console.log(`[b${idx}] === P1 signed-in landing ===`);
     try { await page.goto(urls.signedInLanding, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
-    await new Promise(r => setTimeout(r, 800));
-
+    await new Promise(r => setTimeout(r, DWELL_MS));
     let r = await readAllCookies(context, page);
     console.log(`[b${idx}] ${line(r.merged, 'after-P1')}`);
 
-    /* ═══════════════════════════════════════════════
-     * P2 — amazonpay/home
-     * ═══════════════════════════════════════════════ */
+    /* P2 — amazonpay/home */
     console.log(`[b${idx}] === P2 amazonpay/home ===`);
     try { await page.goto(urls.payHome, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, DWELL_MS));
     r = await readAllCookies(context, page);
     console.log(`[b${idx}] ${line(r.merged, 'after-P2')}`);
 
-    /* ═══════════════════════════════════════════════
-     * P3 — category landing (electricity / lpg / prepaid)
-     * ═══════════════════════════════════════════════ */
+    /* P3 — category landing */
     console.log(`[b${idx}] === P3 landing/${urls.label} ===`);
     try { await page.goto(urls.landing, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, DWELL_MS));
     r = await readAllCookies(context, page);
     console.log(`[b${idx}] ${line(r.merged, 'after-P3')}`);
 
-    /* ═══════════════════════════════════════════════
-     * P4 — interstitial (biller specific)
-     * ═══════════════════════════════════════════════ */
+    /* P4 — interstitial (biller specific) */
     if (urls.interstitial) {
       console.log(`[b${idx}] === P4 interstitial/${urls.label}/${billerId} ===`);
       try { await page.goto(urls.interstitial, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
-      await new Promise(r => setTimeout(r, 800));
+      await new Promise(r => setTimeout(r, DWELL_MS));
     }
 
-    /* ═══════════════════════════════════════════════
-     * P5 — detail page (the page that has the <meta name="csrf-token">)
-     * ═══════════════════════════════════════════════ */
+    /* P5 — detail page */
     console.log(`[b${idx}] === P5 detail/${urls.label} ===`);
     try { await page.goto(urls.detail, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }); } catch (_) {}
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, DWELL_MS));
 
     /* Extract csrf-token from the rendered HTML */
     try {
@@ -450,60 +456,45 @@ async function refresh({ cookies, proxy, userAgent, headers, category = 'ELECTRI
     } catch (_) {}
 
     /* ═══════════════════════════════════════════════
-     * Wait until cmc is present in any storage
+     * Wait for cookies to settle
+     *   • Break immediately on CMC
+     *   • Break when csrf + at least 2 of 3 WAF cookies are present
+     *   • Fallback: bm_sv + csrf alone is sufficient
      * ═══════════════════════════════════════════════ */
-   /* ═══════════════════════════════════════════════
- * Wait for cookies to settle.
- *   • Break immediately on CMC (if it ever arrives)
- *   • Break on ak_bmsc + bm_sv (the two the WAF cares about)
- *     — aws-waf-token is optional: if it's there, great;
- *       if not, we move on anyway.
- *   • Never wait the full CMC_WAIT_MS unless cookies never form
- * ═══════════════════════════════════════════════ */
-  const deadline = Date.now() + CMC_WAIT_MS;
-  let iter = 0;
-  while (Date.now() < deadline) {
+    const deadline = Date.now() + CMC_WAIT_MS;
+    let iter = 0;
+    while (Date.now() < deadline) {
       iter++;
       r = await readAllCookies(context, page);
 
-      const hasCmc   = r.merged.cmc && r.merged.cmc.length >= MIN_CMC_LEN;
-      const hasAk    = !!r.merged.ak_bmsc;
-      const hasBm    = !!r.merged.bm_sv;
-      const hasWaf   = !!r.merged['aws-waf-token'];   // optional
+      const hasCmc = r.merged.cmc && r.merged.cmc.length >= MIN_CMC_LEN;
+      const hasAk  = !!r.merged.ak_bmsc;
+      const hasBm  = !!r.merged.bm_sv;
+      const hasWaf = !!r.merged['aws-waf-token'];
 
-      /* ✅ Break: CMC arrived */
       if (hasCmc) {
-          if (VERBOSE) console.log(`[b${idx}] CMC detected after ${iter} iteration(s)`);
-          break;
+        if (VERBOSE) console.log(`[b${idx}] cookie-wait done at iter ${iter}: cmc present`);
+        break;
       }
 
-      /* ✅ Break: primary WAF pair present (aws-waf-token optional) */
-      if (hasAk && hasBm) {
-          if (VERBOSE) {
-              console.log(`[b${idx}] WAF cookies ready after ${iter} iteration(s)  ak=${hasAk} bm=${hasBm} waf=${hasWaf}`);
-          }
-          break;
+      const wafCount = [hasAk, hasBm, hasWaf].filter(Boolean).length;
+      if (csrfToken && wafCount >= 2) {
+        if (VERBOSE) console.log(`[b${idx}] cookie-wait done at iter ${iter}: csrf=yes ak=${hasAk} bm=${hasBm} waf=${hasWaf}`);
+        break;
       }
 
-      /* ✅ Break: only ak_bmsc + aws-waf-token present — rare but acceptable */
-      if (hasAk && hasWaf) {
-          if (VERBOSE) console.log(`[b${idx}] ak_bmsc + aws-waf-token ready after ${iter} iteration(s) — bm_sv missing, proceeding`);
-          break;
+      if (hasBm && csrfToken) {
+        if (VERBOSE) console.log(`[b${idx}] cookie-wait done at iter ${iter}: bm_sv + csrf, proceeding`);
+        break;
       }
 
-      /* ✅ Break: only bm_sv + aws-waf-token present — same idea */
-      if (hasBm && hasWaf) {
-          if (VERBOSE) console.log(`[b${idx}] bm_sv + aws-waf-token ready after ${iter} iteration(s) — ak_bmsc missing, proceeding`);
-          break;
-      }
+      await new Promise(res => setTimeout(res, 300));
+    }
 
-      await new Promise(res => setTimeout(res, 500));
-  }
-
-  if (VERBOSE && iter > 1) {
+    if (VERBOSE && iter > 1) {
       r = await readAllCookies(context, page);
       console.log(`[b${idx}] cookie-wait finished after ${iter} iter(s)  ${line(r.merged, 'settled')}`);
-  }
+    }
 
     r = await readAllCookies(context, page);
     console.log(`[b${idx}] ${line(r.merged, 'done')}  ${Date.now() - t0}ms`);
@@ -564,7 +555,7 @@ app.post('/refresh', (req, res) => {
 });
 
 const server = app.listen(PORT, HOST, async () => {
-  console.log(`[cookie-refresher] listening on http://${HOST}:${PORT}  concurrency=${CONCURRENCY}`);
+  console.log(`[cookie-refresher] listening on http://${HOST}:${PORT}  concurrency=${CONCURRENCY}  ephemeral=${EPHEMERAL}`);
   for (let i = 0; i < CONCURRENCY; i++) await getBrowser(i);
   console.log('[cookie-refresher] pool ready');
 });
